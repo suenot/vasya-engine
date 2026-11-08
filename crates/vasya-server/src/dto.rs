@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, SimpleObject)]
 #[serde(rename_all = "camelCase")]
 pub struct Chat {
+    #[serde(default = "default_provider")]
+    pub provider: String,
     pub id: i64,
     pub title: String,
     pub username: Option<String>,
@@ -46,6 +48,8 @@ pub struct MediaInfo {
 
 #[derive(Debug, Serialize, Deserialize, SimpleObject)]
 pub struct Message {
+    #[serde(default = "default_provider")]
+    pub provider: String,
     pub id: i32,
     pub chat_id: i64,
     pub from_user_id: Option<i64>,
@@ -55,6 +59,10 @@ pub struct Message {
     pub is_outgoing: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub media: Option<Vec<MediaInfo>>,
+}
+
+fn default_provider() -> String {
+    "telegram".to_owned()
 }
 
 // --- Auth (snake_case, mirrors vasya_core::telegram::auth::UserInfo) ----------

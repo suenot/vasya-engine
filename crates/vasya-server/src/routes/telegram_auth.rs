@@ -85,6 +85,7 @@ pub async fn request_login_code(
     user: Extension<UserId>,
     Json(req): Json<LoginCodeRequest>,
 ) -> Result<Json<LoginCodeResponse>, ApiError> {
+    crate::providers::ensure_enabled(&ctx, crate::channel_telegram::TELEGRAM)?;
     Ok(Json(request_login_code_op(&ctx, &user.0, req.phone).await?))
 }
 
@@ -174,6 +175,7 @@ pub async fn verify_code(
     user: Extension<UserId>,
     Json(req): Json<VerifyCodeRequest>,
 ) -> Result<Json<LoginOutcome>, ApiError> {
+    crate::providers::ensure_enabled(&ctx, crate::channel_telegram::TELEGRAM)?;
     let result = verify_code_op(&ctx, &user.0, req.account_id, req.code).await?;
     Ok(Json(result.into()))
 }
@@ -225,6 +227,7 @@ pub async fn check_password(
     user: Extension<UserId>,
     Json(req): Json<CheckPasswordRequest>,
 ) -> Result<Json<LoginOutcome>, ApiError> {
+    crate::providers::ensure_enabled(&ctx, crate::channel_telegram::TELEGRAM)?;
     let user_info = check_password_op(&ctx, &user.0, req.account_id, req.password).await?;
     Ok(Json(LoginOutcome::Authorized {
         status: "authorized",

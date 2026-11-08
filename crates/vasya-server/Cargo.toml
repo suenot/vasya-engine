@@ -14,6 +14,8 @@ path = "src/main.rs"
 
 [dependencies]
 vasya-core = { path = "../vasya-core" }
+vasya-channel = { path = "../vasya-channel" }
+async-trait = "0.1"
 
 # Telegram (raw TL calls in handlers)
 grammers-client = "0.8"

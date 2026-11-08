@@ -110,13 +110,15 @@ pub async fn agent_policy(
                 "Agent keys cannot manage keys or read the audit log".into(),
             ))
         }
-        // Admin routes (e.g. the global Telegram credentials) are human-only —
-        // an agent key whose owner is an admin must NOT inherit admin rights.
-        Some(&"translation") => {
+        Some(&"providers")
+            if segments.len() == 3 && matches!(segments[2], "enable" | "disable") =>
+        {
             return Err(ApiError::Forbidden(
-                "Translation settings and requests require a human session".into(),
+                "Agent keys cannot manage providers".into(),
             ));
         }
+        // Admin routes (e.g. the global Telegram credentials) are human-only —
+        // an agent key whose owner is an admin must NOT inherit admin rights.
         Some(&"admin") => {
             return Err(ApiError::Forbidden(
                 "Agent keys cannot access admin routes".into(),

@@ -82,6 +82,7 @@ fn dialog_to_chat(dialog: &grammers_client::types::Dialog) -> (i64, Chat) {
     (
         chat_id,
         Chat {
+            provider: "telegram".to_string(),
             id: chat_id,
             title,
             username,

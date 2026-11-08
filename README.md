@@ -2,8 +2,9 @@
 
 The single source of truth for the Vasya messenger engine, shared by every client:
 
+- `crates/vasya-channel`: provider-neutral `ChannelProvider` trait, `Capabilities`, normalized chat/message types and the `ProviderRegistry` (enable/disable at runtime, sessions kept).
 - `crates/vasya-core`: Tauri-free Telegram engine (grammers): sessions, updates, media, STT, translation.
-- `crates/vasya-server`: REST / GraphQL / SSE API over the core (library and standalone binary).
+- `crates/vasya-server`: REST / GraphQL / SSE API over the core (library and standalone binary). Hosts the Telegram `ChannelProvider` adapter and `/api/v1/providers` (list, accounts, admin-only enable/disable, saved in `providers.json`).
 - `vendor/grammers-session`: patched grammers-session (channel-id range fix).
 
 Used by [vasyaapp](https://github.com/suenot/vasyaapp) (Tauri + web) and

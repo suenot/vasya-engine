@@ -15,6 +15,7 @@ pub mod accounts;
 pub mod agent_keys;
 pub mod audit;
 pub mod auth;
+pub mod channel_telegram;
 pub mod context;
 pub mod dto;
 pub mod error;
@@ -24,6 +25,7 @@ pub mod idempotency;
 pub mod openapi;
 pub mod peer;
 pub mod policy;
+pub mod providers;
 pub mod rate_limit;
 pub mod routes;
 
@@ -101,8 +103,24 @@ pub fn build_context(
     let agent_keys = agent_keys::AgentKeyStore::open(options.data_dir.join("agent-keys.json"))?;
     let audit = audit::AuditLog::open(options.data_dir.join("audit.log"))?;
 
-    Ok(Arc::new(ServerContext {
+    let disabled_providers = providers::load_disabled(&options.data_dir)?;
+
+    // Cyclic: provider adapters call back into the context through a Weak.
+    Ok(Arc::new_cyclic(|weak| ServerContext {
         manager,
+        providers: {
+            let registry = Arc::new(vasya_channel::ProviderRegistry::new());
+            registry.register(
+                Arc::new(channel_telegram::TelegramProvider::new(weak.clone())),
+                true,
+            );
+            for id in &disabled_providers {
+                // Unknown ids (a provider compiled out of this build) are kept
+                // in the file but have nothing to switch off here.
+                let _ = registry.disable(id);
+            }
+            registry
+        },
         events: Arc::new(BroadcastEventSink::new(options.events_capacity)),
         auth: options.auth,
         admins: options.admins,
@@ -183,6 +201,158 @@ mod tests {
     async fn body_json(response: axum::response::Response) -> serde_json::Value {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn provider_routes_list_enable_disable_and_report_disabled() {
+        let (_dir, app) = test_app("tok");
+        let request = |method: &str, path: &str| {
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header("Authorization", "Bearer tok")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let res = app
+            .clone()
+            .oneshot(request("GET", "/api/v1/providers"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_json(res).await;
+        assert_eq!(body[0]["id"], "telegram");
+        assert_eq!(body[0]["enabled"], true);
+        assert!(body[0]["capabilities"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("history")));
+
+        let res = app
+            .clone()
+            .oneshot(request("POST", "/api/v1/providers/telegram/disable"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let res = app
+            .clone()
+            .oneshot(request("GET", "/api/v1/providers/telegram/accounts"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body_json(res).await["code"], "provider_disabled");
+        // Existing Telegram routes are gated too, before any account lookup.
+        let res = app
+            .clone()
+            .oneshot(request("GET", "/api/v1/accounts/acc1/chats"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body_json(res).await["code"], "provider_disabled");
+        let saved = std::fs::read_to_string(_dir.path().join("data/providers.json")).unwrap();
+        assert!(
+            saved.contains("telegram"),
+            "disabled state must be saved: {saved}"
+        );
+
+        let res = app
+            .clone()
+            .oneshot(request("POST", "/api/v1/providers/telegram/enable"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let res = app
+            .oneshot(request("POST", "/api/v1/providers/nope/disable"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body_json(res).await["code"], "provider_unknown");
+    }
+
+    #[tokio::test]
+    async fn disabled_provider_survives_restart_and_keeps_listing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        std::fs::write(
+            dir.path().join("data/providers.json"),
+            r#"{"disabled":["telegram","whatsapp"]}"#,
+        )
+        .unwrap();
+        let manager = Arc::new(TelegramClientManager::with_key_provider(
+            dir.path().join("sessions"),
+            1,
+            "hash".into(),
+            Arc::new(vasya_core::telegram::master_key::FileKeyProvider::new(
+                dir.path().join("master.key"),
+            )),
+        ));
+        let ctx = build_context(
+            manager,
+            ServerOptions::new(
+                AuthMode::EmbeddedLocal {
+                    token: "tok".into(),
+                },
+                dir.path().join("data"),
+            ),
+        )
+        .unwrap();
+        let list = ctx.providers.list();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "telegram");
+        assert!(!list[0].enabled, "disabled flag must be restored");
+    }
+
+    #[tokio::test]
+    async fn telegram_adapter_lists_only_the_callers_accounts() {
+        let (_dir, app_ctx) = {
+            let dir = tempfile::tempdir().unwrap();
+            let manager = Arc::new(TelegramClientManager::with_key_provider(
+                dir.path().join("sessions"),
+                1,
+                "hash".into(),
+                Arc::new(vasya_core::telegram::master_key::FileKeyProvider::new(
+                    dir.path().join("master.key"),
+                )),
+            ));
+            let ctx = build_context(
+                manager,
+                ServerOptions::new(
+                    AuthMode::EmbeddedLocal {
+                        token: "tok".into(),
+                    },
+                    dir.path().join("data"),
+                ),
+            )
+            .unwrap();
+            (dir, ctx)
+        };
+        let provider = app_ctx.providers.get("telegram").unwrap();
+        let accounts = provider
+            .list_accounts(&vasya_channel::Caller::new("nobody"))
+            .await
+            .unwrap();
+        assert!(accounts.is_empty());
+        let err = provider
+            .history(
+                &vasya_channel::Caller::new("nobody"),
+                &"acc1".into(),
+                &"42".into(),
+                vasya_channel::Page {
+                    limit: 10,
+                    offset_id: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        // Someone else's (or a missing) account is refused, never served.
+        assert!(
+            matches!(
+                err,
+                vasya_channel::ProviderError::Forbidden(_)
+                    | vasya_channel::ProviderError::NotFound(_)
+            ),
+            "got {err:?}"
+        );
     }
 
     #[tokio::test]

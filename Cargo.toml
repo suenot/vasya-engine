@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/vasya-core", "crates/vasya-server"]
+members = ["crates/vasya-channel", "crates/vasya-core", "crates/vasya-server"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "Unlicense"
 

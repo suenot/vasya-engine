@@ -42,6 +42,7 @@ pub(crate) async fn account_client(
     user: &UserId,
     account_id: &str,
 ) -> Result<std::sync::Arc<vasya_core::telegram::client_manager::TelegramClientWrapper>, ApiError> {
+    crate::providers::ensure_enabled(ctx, crate::channel_telegram::TELEGRAM)?;
     ctx.accounts.ensure_access(&user.0, account_id)?;
     ctx.manager
         .get_client(account_id)
@@ -55,6 +56,10 @@ pub fn api_router(ctx: Arc<ServerContext>) -> Router {
     let protected = Router::new()
         // GraphQL queries/mutations (same bearer middleware as REST)
         .route("/graphql", post(graphql_http::graphql_post))
+        .route("/providers", get(crate::providers::list))
+        .route("/providers/{id}/accounts", get(crate::providers::accounts))
+        .route("/providers/{id}/enable", post(crate::providers::enable))
+        .route("/providers/{id}/disable", post(crate::providers::disable))
         // Telegram API credentials: per-user (opt-in) + admin-only global
         // default (see routes/telegram_creds.rs). Credential management is
         // human-session-only (agent keys are blocked in policy.rs).

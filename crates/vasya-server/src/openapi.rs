@@ -24,6 +24,10 @@ fn audio_stub_op(summary: &str) -> serde_json::Value {
 
 pub async fn openapi_json() -> Json<serde_json::Value> {
     let paths = serde_json::json!({
+        "/api/v1/providers": { "get": op("List providers, enabled state, and capabilities", "providers") },
+        "/api/v1/providers/{id}/accounts": { "get": op("List the caller's accounts on an enabled provider", "providers") },
+        "/api/v1/providers/{id}/enable": { "post": op("Enable a registered provider (admin, human session only)", "providers") },
+        "/api/v1/providers/{id}/disable": { "post": op("Disable a provider for the whole server; sessions are kept (admin, human session only)", "providers") },
         "/api/v1/health": { "get": { "summary": "Health check (no auth)", "tags": ["meta"],
             "security": [], "responses": { "200": { "description": "OK" } } } },
         "/api/v1/events": { "get": op("SSE stream of realtime events (telegram:new-message, chat-loaded, …); ?account= filters to one account", "realtime") },

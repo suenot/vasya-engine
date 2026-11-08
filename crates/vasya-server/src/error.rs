@@ -16,6 +16,12 @@ pub enum ApiError {
     Forbidden(String),
     #[error("{0}")]
     NotFound(String),
+    #[error("provider {id} unavailable ({code})")]
+    ProviderNotFound {
+        code: &'static str,
+        id: String,
+        known: Vec<String>,
+    },
     /// Local rate limiter rejected the request.
     #[error("Rate limit exceeded")]
     RateLimited { retry_after_secs: u64 },
@@ -41,11 +47,20 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let provider_details = match &self {
+            ApiError::ProviderNotFound { code, id, known } => {
+                Some((*code, id.clone(), known.clone()))
+            }
+            _ => None,
+        };
         let (status, retry_after, message) = match self {
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, None, m),
             ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, None, "Unauthorized".into()),
             ApiError::Forbidden(m) => (StatusCode::FORBIDDEN, None, m),
             ApiError::NotFound(m) => (StatusCode::NOT_FOUND, None, m),
+            ApiError::ProviderNotFound { .. } => {
+                (StatusCode::NOT_FOUND, None, "Provider unavailable".into())
+            }
             ApiError::RateLimited { retry_after_secs } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 Some(retry_after_secs),
@@ -69,7 +84,12 @@ impl IntoResponse for ApiError {
             }
         };
 
-        let body = Json(serde_json::json!({ "error": message }));
+        let body = match provider_details {
+            Some((code, id, known)) => Json(
+                serde_json::json!({ "error": message, "code": code, "id": id, "known": known }),
+            ),
+            None => Json(serde_json::json!({ "error": message })),
+        };
         let mut response = (status, body).into_response();
         if let Some(secs) = retry_after {
             if let Ok(v) = header::HeaderValue::from_str(&secs.to_string()) {

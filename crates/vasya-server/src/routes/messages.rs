@@ -62,6 +62,7 @@ fn extract_media_info(msg: &GrammersMessage) -> Option<Vec<MediaInfo>> {
 fn message_to_dto(msg: &GrammersMessage, chat_id: i64) -> Message {
     let sender = msg.sender();
     Message {
+        provider: "telegram".to_string(),
         id: msg.id(),
         chat_id,
         from_user_id: sender
@@ -180,6 +181,7 @@ pub(crate) async fn get_messages_op(
                         .as_ref()
                         .and_then(|p| names.get(&peer_to_id(p)).cloned());
                     Some(Message {
+                        provider: "telegram".to_string(),
                         id: msg.id,
                         chat_id,
                         from_user_id,
