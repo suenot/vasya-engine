@@ -1,0 +1,5 @@
+/target
+**/target
+.env
+*.session
+*.session.enc
