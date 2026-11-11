@@ -20,6 +20,8 @@ pub mod accounts;
 pub mod agent_keys;
 pub mod calls;
 pub mod chats;
+#[cfg(feature = "email")]
+pub mod email;
 pub mod events;
 pub mod folders;
 pub mod graphql_http;
@@ -58,6 +60,14 @@ pub fn api_router(ctx: Arc<ServerContext>) -> Router {
         .route("/graphql", post(graphql_http::graphql_post))
         .route("/providers", get(crate::providers::list))
         .route("/providers/{id}/accounts", get(crate::providers::accounts))
+        .route(
+            "/providers/{id}/accounts/{acc}/chats",
+            get(crate::providers::chats),
+        )
+        .route(
+            "/providers/{id}/accounts/{acc}/chats/{chat}/messages",
+            get(crate::providers::history).post(crate::providers::send),
+        )
         .route("/providers/{id}/enable", post(crate::providers::enable))
         .route("/providers/{id}/disable", post(crate::providers::disable))
         // Telegram API credentials: per-user (opt-in) + admin-only global
@@ -234,7 +244,19 @@ pub fn api_router(ctx: Arc<ServerContext>) -> Router {
         // Storage-mode: fixed server-side storage (GET reports it, PUT 400s —
         // the local/remote toggle is desktop-only; see routes/storage_mode.rs).
         .route("/storage-mode", get(storage_mode::get_storage_mode))
-        .route("/storage-mode", put(storage_mode::set_storage_mode))
+        .route("/storage-mode", put(storage_mode::set_storage_mode));
+
+    #[cfg(feature = "email")]
+    let protected = protected
+        .route(
+            "/email/accounts",
+            get(email::list_accounts)
+                .post(email::add_account)
+                .layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route("/email/accounts/{acc}", delete(email::delete_account));
+
+    let protected = protected
         // Layer order (inner→outer as added): idempotency → agent policy →
         // audit → auth. Audit records policy rejections and replays.
         .layer(middleware::from_fn_with_state(

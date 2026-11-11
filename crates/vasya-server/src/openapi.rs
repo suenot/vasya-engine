@@ -26,6 +26,12 @@ pub async fn openapi_json() -> Json<serde_json::Value> {
     let paths = serde_json::json!({
         "/api/v1/providers": { "get": op("List providers, enabled state, and capabilities", "providers") },
         "/api/v1/providers/{id}/accounts": { "get": op("List the caller's accounts on an enabled provider", "providers") },
+        "/api/v1/providers/{id}/accounts/{acc}/chats": { "get": op("List chats for a provider account; limit and offset are optional", "providers") },
+        "/api/v1/providers/{id}/accounts/{acc}/chats/{chat}/messages": { "get": op("Read chat history", "providers"), "post": op("Send a text message", "providers") },
+        "/api/v1/email/accounts": {
+            "get": op("List the caller's email accounts; never includes the password (human session only)", "email"),
+            "post": op("Add an email account: verifies IMAP and SMTP over TLS, stores the config encrypted per user (human session only)", "email") },
+        "/api/v1/email/accounts/{acc}": { "delete": op("Remove the caller's email account (human session only)", "email") },
         "/api/v1/providers/{id}/enable": { "post": op("Enable a registered provider (admin, human session only)", "providers") },
         "/api/v1/providers/{id}/disable": { "post": op("Disable a provider for the whole server; sessions are kept (admin, human session only)", "providers") },
         "/api/v1/health": { "get": { "summary": "Health check (no auth)", "tags": ["meta"],

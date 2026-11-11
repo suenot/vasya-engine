@@ -1,0 +1,24 @@
+[package]
+name = "vasya-channel-email"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vasya-channel = { path = "../vasya-channel" }
+async-trait = "0.1"
+tokio = { version = "1.40", features = ["rt", "macros", "time", "net", "io-util"] }
+async-imap = { version = "0.10", default-features = false, features = ["runtime-tokio"] }
+# TLS: rustls only (no OpenSSL/native-tls), same as the rest of the stack.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+webpki-roots = "1"
+futures = "0.3"
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls"] }
+mail-parser = "0.9"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+serde_json = "1"
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros"] }

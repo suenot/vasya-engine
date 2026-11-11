@@ -35,6 +35,12 @@ pub(crate) fn required_scope(method: &Method, segments: &[&str]) -> Option<&'sta
     match segments {
         ["events"] => Some("events:read"),
         ["telegram", ..] => Some("telegram:login"),
+        ["providers", _, "accounts", _, "chats"] => Some("chats:read"),
+        ["providers", _, "accounts", _, "chats", _, "messages"] => Some(if get {
+            "messages:read"
+        } else {
+            "messages:send"
+        }),
         ["accounts"] => Some("accounts:read"),
         // logout/delete the account — its own high-blast-radius scope,
         // no longer bundled with login.
@@ -130,9 +136,9 @@ pub async fn agent_policy(
     // Credential management (per-user api_id/api_hash) is human-session-only;
     // agents log in with the resolved credentials but cannot change them.
     // (Note: /telegram/login/* stays agent-allowed via the scope map below.)
-    if segments.as_slice() == ["telegram", "credentials"] {
+    if segments.as_slice() == ["telegram", "credentials"] || segments.first() == Some(&"email") {
         return Err(ApiError::Forbidden(
-            "Agent keys cannot manage Telegram credentials".into(),
+            "Agent keys cannot manage email or Telegram credentials".into(),
         ));
     }
 

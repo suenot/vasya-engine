@@ -23,6 +23,9 @@ use crate::rate_limit::RateLimiter;
 pub struct ServerContext {
     pub manager: Arc<TelegramClientManager>,
     pub providers: Arc<vasya_channel::ProviderRegistry>,
+    /// Concrete email provider (account management); also registered in `providers`.
+    #[cfg(feature = "email")]
+    pub email: Option<Arc<vasya_channel_email::EmailProvider>>,
     /// Event bus: every update pump publishes here. GraphQL subscriptions
     /// (task #5) and the /events SSE endpoint fan out from it.
     pub events: Arc<BroadcastEventSink>,

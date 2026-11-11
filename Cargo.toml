@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/vasya-channel", "crates/vasya-core", "crates/vasya-server"]
+members = ["crates/vasya-channel", "crates/vasya-channel-email", "crates/vasya-core", "crates/vasya-server"]
 
 [workspace.package]
 version = "0.2.0"

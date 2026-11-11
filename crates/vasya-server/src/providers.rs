@@ -11,12 +11,12 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     Extension, Json,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use vasya_channel::{Caller, ProviderError, RegistryError};
+use vasya_channel::{AccountId, Caller, ChatId, Outgoing, Page, ProviderError, RegistryError};
 
 use crate::{auth::UserId, context::ServerContext, error::ApiError};
 
@@ -73,6 +73,68 @@ pub async fn accounts(
         .await
         .map(Json)
         .map_err(provider_error)
+}
+
+#[derive(Deserialize)]
+pub struct PageQuery {
+    limit: Option<usize>,
+    offset: Option<String>,
+}
+fn page(q: PageQuery) -> Page {
+    Page {
+        limit: q.limit.unwrap_or(50).min(500),
+        offset_id: q.offset,
+    }
+}
+pub async fn chats(
+    State(ctx): State<Arc<ServerContext>>,
+    Extension(user): Extension<UserId>,
+    Path((id, acc)): Path<(String, String)>,
+    Query(q): Query<PageQuery>,
+) -> Result<Json<Vec<vasya_channel::Chat>>, ApiError> {
+    let p = ctx.providers.get(&id).map_err(registry_error)?;
+    p.list_chats(&Caller::new(user.0), &AccountId(acc), page(q))
+        .await
+        .map(Json)
+        .map_err(provider_error)
+}
+pub async fn history(
+    State(ctx): State<Arc<ServerContext>>,
+    Extension(user): Extension<UserId>,
+    Path((id, acc, chat)): Path<(String, String, String)>,
+    Query(q): Query<PageQuery>,
+) -> Result<Json<Vec<vasya_channel::Message>>, ApiError> {
+    let p = ctx.providers.get(&id).map_err(registry_error)?;
+    p.history(
+        &Caller::new(user.0),
+        &AccountId(acc),
+        &ChatId(chat),
+        page(q),
+    )
+    .await
+    .map(Json)
+    .map_err(provider_error)
+}
+#[derive(Deserialize)]
+pub struct SendRequest {
+    text: String,
+}
+pub async fn send(
+    State(ctx): State<Arc<ServerContext>>,
+    Extension(user): Extension<UserId>,
+    Path((id, acc, chat)): Path<(String, String, String)>,
+    Json(req): Json<SendRequest>,
+) -> Result<Json<vasya_channel::Message>, ApiError> {
+    let p = ctx.providers.get(&id).map_err(registry_error)?;
+    p.send(
+        &Caller::new(user.0),
+        &AccountId(acc),
+        &ChatId(chat),
+        Outgoing::Text { text: req.text },
+    )
+    .await
+    .map(Json)
+    .map_err(provider_error)
 }
 
 pub async fn enable(

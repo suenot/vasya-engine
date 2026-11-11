@@ -18,6 +18,8 @@ pub mod auth;
 pub mod channel_telegram;
 pub mod context;
 pub mod dto;
+#[cfg(feature = "email")]
+pub mod email;
 pub mod error;
 pub mod flood;
 pub mod graphql;
@@ -58,6 +60,9 @@ pub struct ServerOptions {
     pub events_capacity: usize,
     /// Serve the GraphQL playground page (dev only).
     pub graphql_playground: bool,
+    /// Mail transport override (tests); `None` uses real IMAP/SMTP over TLS.
+    #[cfg(feature = "email")]
+    pub mail_backend: Option<Arc<dyn vasya_channel_email::MailBackend>>,
 }
 
 impl ServerOptions {
@@ -81,6 +86,8 @@ impl ServerOptions {
             idempotency_ttl: std::time::Duration::from_secs(24 * 60 * 60),
             events_capacity: 1024,
             graphql_playground: false,
+            #[cfg(feature = "email")]
+            mail_backend: None,
         }
     }
 }
@@ -105,6 +112,24 @@ pub fn build_context(
 
     let disabled_providers = providers::load_disabled(&options.data_dir)?;
 
+    #[cfg(feature = "email")]
+    let email = {
+        // Private/loopback mail hosts are only reachable in the desktop app.
+        let allow_local = matches!(options.auth, AuthMode::EmbeddedLocal { .. });
+        let backend = options
+            .mail_backend
+            .clone()
+            .unwrap_or_else(|| Arc::new(vasya_channel_email::ImapSmtpBackend::new(allow_local)));
+        let store = email::EncryptedStore::new(
+            options.data_dir.join("email"),
+            manager.master_key_provider(),
+        );
+        Arc::new(vasya_channel_email::EmailProvider::new(
+            backend,
+            Arc::new(store),
+        ))
+    };
+
     // Cyclic: provider adapters call back into the context through a Weak.
     Ok(Arc::new_cyclic(|weak| ServerContext {
         manager,
@@ -114,6 +139,8 @@ pub fn build_context(
                 Arc::new(channel_telegram::TelegramProvider::new(weak.clone())),
                 true,
             );
+            #[cfg(feature = "email")]
+            registry.register(email.clone(), true);
             for id in &disabled_providers {
                 // Unknown ids (a provider compiled out of this build) are kept
                 // in the file but have nothing to switch off here.
@@ -121,6 +148,8 @@ pub fn build_context(
             }
             registry
         },
+        #[cfg(feature = "email")]
+        email: Some(email),
         events: Arc::new(BroadcastEventSink::new(options.events_capacity)),
         auth: options.auth,
         admins: options.admins,
@@ -221,9 +250,14 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let body = body_json(res).await;
-        assert_eq!(body[0]["id"], "telegram");
-        assert_eq!(body[0]["enabled"], true);
-        assert!(body[0]["capabilities"]
+        let telegram = body
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "telegram")
+            .expect("telegram is listed");
+        assert_eq!(telegram["enabled"], true);
+        assert!(telegram["capabilities"]
             .as_array()
             .unwrap()
             .contains(&serde_json::json!("history")));
@@ -297,9 +331,14 @@ mod tests {
         )
         .unwrap();
         let list = ctx.providers.list();
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].id, "telegram");
-        assert!(!list[0].enabled, "disabled flag must be restored");
+        let telegram = list.iter().find(|p| p.id == "telegram").unwrap();
+        assert!(!telegram.enabled, "disabled flag must be restored");
+        assert!(
+            list.iter()
+                .filter(|p| p.id != "telegram")
+                .all(|p| p.enabled),
+            "other providers stay enabled"
+        );
     }
 
     #[tokio::test]
@@ -1539,5 +1578,307 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(body_json(res).await["configured"], true);
+    }
+
+    #[cfg(feature = "email")]
+    mod email_tests {
+        use super::*;
+        use async_trait::async_trait;
+        use vasya_channel_email::{Envelope, MailBackend, MailConfig, RawMail};
+
+        struct Fake;
+        #[async_trait]
+        impl MailBackend for Fake {
+            async fn verify(&self, c: &MailConfig) -> Result<(), String> {
+                if c.password == "wrong" {
+                    Err("IMAP login failed".into())
+                } else {
+                    Ok(())
+                }
+            }
+            async fn envelopes(&self, _: &MailConfig, _: usize) -> Result<Vec<Envelope>, String> {
+                Ok(vec![Envelope {
+                    mailbox: "INBOX".into(),
+                    uid: 7,
+                    date: 100,
+                    from: "Friend@Example.com".into(),
+                    from_name: Some("Friend".into()),
+                    to: vec!["me@example.com".into()],
+                    to_names: vec![None],
+                    subject: None,
+                }])
+            }
+            async fn fetch(&self, _: &MailConfig, _: &str, _: u32) -> Result<RawMail, String> {
+                Ok(RawMail {
+                    bytes: b"Content-Type: text/plain\r\n\r\nhello".to_vec(),
+                })
+            }
+            async fn send(&self, _: &MailConfig, _: &str, _: &str) -> Result<(), String> {
+                Ok(())
+            }
+        }
+
+        fn app() -> (tempfile::TempDir, axum::Router) {
+            let dir = tempfile::tempdir().unwrap();
+            let manager = Arc::new(TelegramClientManager::with_key_provider(
+                dir.path().join("sessions"),
+                1,
+                "hash".into(),
+                Arc::new(vasya_core::telegram::master_key::FileKeyProvider::new(
+                    dir.path().join("master.key"),
+                )),
+            ));
+            let mut options = ServerOptions::new(
+                AuthMode::EmbeddedLocal {
+                    token: "tok".into(),
+                },
+                dir.path().join("data"),
+            );
+            options.mail_backend = Some(Arc::new(Fake));
+            (dir, build_router(build_context(manager, options).unwrap()))
+        }
+
+        fn req(method: &str, path: &str, body: Option<serde_json::Value>) -> Request<Body> {
+            let builder = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("Authorization", "Bearer tok")
+                .header("content-type", "application/json");
+            builder
+                .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
+                .unwrap()
+        }
+
+        fn account(password: &str) -> serde_json::Value {
+            serde_json::json!({
+                "email": "Me@Example.com", "imap_host": "imap.example.com", "imap_port": 993,
+                "smtp_host": "smtp.example.com", "smtp_port": 465,
+                "username": "me", "password": password,
+            })
+        }
+
+        #[tokio::test]
+        async fn account_lifecycle_chats_send_and_encrypted_at_rest() {
+            let (dir, app) = app();
+            let res = app
+                .clone()
+                .oneshot(req(
+                    "POST",
+                    "/api/v1/email/accounts",
+                    Some(account("wrong")),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::BAD_REQUEST,
+                "failed login is rejected"
+            );
+
+            let res = app
+                .clone()
+                .oneshot(req(
+                    "POST",
+                    "/api/v1/email/accounts",
+                    Some(account("s3cret-pass")),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            let added = body_json(res).await;
+            let id = added["account_id"].as_str().unwrap().to_string();
+            assert_eq!(added["email"], "me@example.com");
+            assert!(!added.to_string().contains("s3cret-pass"));
+
+            let res = app
+                .clone()
+                .oneshot(req("GET", "/api/v1/email/accounts", None))
+                .await
+                .unwrap();
+            let listed = body_json(res).await;
+            assert_eq!(listed.as_array().unwrap().len(), 1);
+            assert!(!listed.to_string().contains("s3cret-pass"));
+
+            // Password is not readable on disk.
+            let mut found = 0;
+            for entry in walk(&dir.path().join("data/email")) {
+                let bytes = std::fs::read(&entry).unwrap();
+                assert!(!String::from_utf8_lossy(&bytes).contains("s3cret-pass"));
+                found += 1;
+            }
+            assert_eq!(found, 1);
+
+            let base = format!("/api/v1/providers/email/accounts/{id}");
+            let res = app
+                .clone()
+                .oneshot(req("GET", &format!("{base}/chats"), None))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            let chats = body_json(res).await;
+            assert_eq!(chats[0]["id"], "friend@example.com");
+
+            let res = app
+                .clone()
+                .oneshot(req(
+                    "GET",
+                    &format!("{base}/chats/friend%40example.com/messages"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            assert_eq!(body_json(res).await[0]["text"], "hello");
+
+            let res = app
+                .clone()
+                .oneshot(req(
+                    "POST",
+                    &format!("{base}/chats/friend%40example.com/messages"),
+                    Some(serde_json::json!({"text": "hi"})),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            let res = app
+                .clone()
+                .oneshot(req(
+                    "POST",
+                    &format!("{base}/chats/not-an-address/messages"),
+                    Some(serde_json::json!({"text": "hi"})),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+            let res = app
+                .clone()
+                .oneshot(req("DELETE", &format!("/api/v1/email/accounts/{id}"), None))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            let res = app
+                .clone()
+                .oneshot(req("DELETE", &format!("/api/v1/email/accounts/{id}"), None))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::NOT_FOUND);
+            let res = app
+                .oneshot(req("GET", &format!("{base}/chats"), None))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        }
+
+        fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+            let mut out = vec![];
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    out.extend(walk(&p));
+                } else {
+                    out.push(p);
+                }
+            }
+            out
+        }
+
+        #[tokio::test]
+        async fn disabled_email_provider_answers_404_and_keeps_accounts() {
+            let (_dir, app) = app();
+            let res = app
+                .clone()
+                .oneshot(req("POST", "/api/v1/email/accounts", Some(account("pw"))))
+                .await
+                .unwrap();
+            let id = body_json(res).await["account_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let res = app
+                .clone()
+                .oneshot(req("POST", "/api/v1/providers/email/disable", None))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            for (m, p) in [
+                ("GET", "/api/v1/email/accounts".to_string()),
+                (
+                    "GET",
+                    format!("/api/v1/providers/email/accounts/{id}/chats"),
+                ),
+            ] {
+                let res = app.clone().oneshot(req(m, &p, None)).await.unwrap();
+                assert_eq!(res.status(), StatusCode::NOT_FOUND);
+                assert_eq!(body_json(res).await["code"], "provider_disabled");
+            }
+            app.clone()
+                .oneshot(req("POST", "/api/v1/providers/email/enable", None))
+                .await
+                .unwrap();
+            let res = app
+                .oneshot(req("GET", "/api/v1/email/accounts", None))
+                .await
+                .unwrap();
+            assert_eq!(
+                body_json(res).await.as_array().unwrap().len(),
+                1,
+                "sessions kept"
+            );
+        }
+
+        #[tokio::test]
+        async fn agent_keys_cannot_manage_email_accounts() {
+            let (_dir, app) = app();
+            let body = serde_json::json!({ "name": "bot", "scopes": ["chats:read"] });
+            let res = app
+                .clone()
+                .oneshot(req("POST", "/api/v1/agent-keys", Some(body)))
+                .await
+                .unwrap();
+            let secret = body_json(res).await["secret"].as_str().unwrap().to_string();
+            for (m, p, b) in [
+                ("GET", "/api/v1/email/accounts", None),
+                ("POST", "/api/v1/email/accounts", Some(account("pw"))),
+                ("DELETE", "/api/v1/email/accounts/x", None),
+            ] {
+                let mut r = req(m, p, b);
+                r.headers_mut()
+                    .insert("Authorization", format!("Bearer {secret}").parse().unwrap());
+                let res = app.clone().oneshot(r).await.unwrap();
+                assert_eq!(res.status(), StatusCode::FORBIDDEN, "{m} {p}");
+            }
+        }
+
+        #[test]
+        fn encrypted_store_isolates_users_and_binds_ciphertext_to_owner() {
+            use vasya_channel_email::ConfigStore;
+            let dir = tempfile::tempdir().unwrap();
+            let keys = Arc::new(vasya_core::telegram::master_key::FileKeyProvider::new(
+                dir.path().join("master.key"),
+            ));
+            let store = crate::email::EncryptedStore::new(dir.path().join("email"), keys);
+            let cfg = MailConfig {
+                email: "a@example.com".into(),
+                imap_host: "h".into(),
+                imap_port: 993,
+                smtp_host: "h".into(),
+                smtp_port: 465,
+                username: "a".into(),
+                password: "pw".into(),
+            };
+            let id = uuid::Uuid::new_v4().to_string();
+            store.save("alice", &id, &cfg).unwrap();
+            assert!(store.load("alice", &id).unwrap().is_some());
+            assert!(store.load("bob", &id).unwrap().is_none());
+            assert!(store.list("bob").unwrap().is_empty());
+            assert!(store.load("alice", "../../etc/passwd").is_err());
+            // Copy alice's file into bob's directory: decrypt must fail (AAD).
+            let src = walk(&dir.path().join("email")).pop().unwrap();
+            let bob_dir = dir.path().join("email/bobdir");
+            std::fs::create_dir_all(&bob_dir).unwrap();
+            std::fs::copy(&src, bob_dir.join(format!("{id}.enc"))).unwrap();
+            assert!(!store.delete("bob", &id).unwrap());
+        }
     }
 }
